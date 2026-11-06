@@ -1,0 +1,935 @@
+-- CRM Project: Campaign and Coupon Analysis -- 
+ /* Note: Stage 1 just has some exploratory queries to assess the data
+ Stage 2 has the final queries used for the presentation and final report*/
+
+-- Stage 1: Exploratory -- 
+
+-- Basic Stats - No of Campaigns by Year and Type
+SELECT strftime('%Y', ca.send_date),
+       ca.campaign_type,
+       COUNT(*) AS no_campaigns
+FROM Campaigns ca
+GROUP BY 1, 2;
+
+-- Basic Stats - No of Recepients by Year and Type
+SELECT strftime('%Y', ca.send_date) AS year,
+       ca.campaign_type,
+       SUM(ca.total_recipients) AS no_recipients
+FROM Campaigns ca
+GROUP BY 1, 2;
+
+-- Basic Stats - No of Customers by Year
+SELECT strftime('%Y',join_date) AS year,
+       COUNT(customer_id) AS no_customers
+FROM customers
+GROUP BY 1;
+
+-- Campaing Costs by Year
+SELECT strftime('%Y', send_date) AS year,
+       SUM(campaign_cost) AS total_campaign_costs
+FROM Campaigns
+GROUP BY 1; 
+
+-- Campaign Data by Year and Campaign type
+
+SELECT
+    strftime('%Y', ca.send_date)            AS year,
+    ca.campaign_type,
+    COUNT(ca.campaign_id)                   AS no_campaigns,
+    SUM(ca.total_recipients)                AS no_recipients,
+    ROUND(SUM(ca.campaign_cost), 2)         AS campaign_cost,
+    SUM(log_stats.total_redeemed)           AS total_redeemed,
+    ROUND(SUM(log_stats.total_discount), 2) AS total_discount,
+    ROUND(SUM(ca.campaign_cost) + SUM(log_stats.total_discount), 2) AS total_cost
+FROM Campaigns ca
+LEFT JOIN (
+    SELECT 
+        cl.campaign_id,
+        SUM(cl.coupon_redeemed)                 AS total_redeemed,
+        COALESCE(SUM(t.discount_amount), 0)     AS total_discount
+    FROM Campaign_Logs cl
+    LEFT JOIN Transactions t ON cl.redemption_txn_id = t.transaction_id
+    GROUP BY cl.campaign_id
+) log_stats ON ca.campaign_id = log_stats.campaign_id
+GROUP BY year, ca.campaign_type
+ORDER BY year, ca.campaign_type;
+
+-- Rollup by Year
+SELECT
+    strftime('%Y', ca.send_date)            AS year,
+    COUNT(ca.campaign_id)                   AS no_campaigns,
+    SUM(ca.total_recipients)                AS no_recipients,
+    ROUND(SUM(ca.campaign_cost), 2)         AS campaign_cost,
+    SUM(log_stats.total_redeemed)           AS total_redeemed,
+    ROUND(SUM(log_stats.total_discount), 2) AS total_discount,
+    ROUND(SUM(ca.campaign_cost) + SUM(log_stats.total_discount), 2) AS total_cost
+FROM Campaigns ca
+LEFT JOIN (
+    SELECT 
+        cl.campaign_id,
+        SUM(cl.coupon_redeemed)                 AS total_redeemed,
+        COALESCE(SUM(t.discount_amount), 0)     AS total_discount
+    FROM Campaign_Logs cl
+    LEFT JOIN Transactions t ON cl.redemption_txn_id = t.transaction_id
+    GROUP BY cl.campaign_id
+) log_stats ON ca.campaign_id = log_stats.campaign_id
+GROUP BY year
+ORDER BY year;
+
+
+
+--Stage 2: Overall Analysis for Slides and Report -- 
+
+-- Q1. Campaign activity by year and campaign type
+SELECT strftime('%Y', ca.send_date) AS year,
+       ca.campaign_type,
+       COUNT(*) AS no_campaigns,
+       SUM(ca.total_recipients) AS no_recipients
+FROM Campaigns ca
+GROUP BY 1, 2;
+
+
+-- Q2. Campaign cost, discount spent, and total cost by year and campaign type
+SELECT
+    strftime('%Y', ca.send_date) AS year,
+    ca.campaign_type,
+    COUNT(ca.campaign_id) AS no_campaigns,
+    SUM(ca.total_recipients) AS no_recipients,
+    ROUND(SUM(ca.campaign_cost), 2) AS campaign_cost,
+    SUM(log_stats.total_redeemed) AS total_redeemed,
+    ROUND(SUM(log_stats.total_discount), 2) AS total_discount,
+    ROUND(SUM(ca.campaign_cost) + SUM(log_stats.total_discount), 2) AS total_cost
+FROM Campaigns ca
+LEFT JOIN (
+    SELECT 
+        cl.campaign_id,
+        SUM(cl.coupon_redeemed) AS total_redeemed,
+        COALESCE(SUM(t.discount_amount), 0) AS total_discount
+    FROM Campaign_Logs cl
+    LEFT JOIN Transactions t ON cl.redemption_txn_id = t.transaction_id
+    GROUP BY cl.campaign_id
+) log_stats ON ca.campaign_id = log_stats.campaign_id
+GROUP BY year, ca.campaign_type
+ORDER BY year, ca.campaign_type;
+
+
+-- Q3. Campaign funnel performance by campaign type
+WITH campaign_funnel AS (
+    SELECT
+        ca.campaign_type,
+        COUNT(cl.log_id) AS recipients,
+        SUM(CASE WHEN cl.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opened,
+        SUM(CASE WHEN cl.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicked,
+        SUM(CASE WHEN cl.coupon_redeemed = 1 THEN 1 ELSE 0 END) AS redeemed
+    FROM Campaigns ca
+    LEFT JOIN Campaign_Logs cl ON ca.campaign_id = cl.campaign_id
+    GROUP BY 1
+)
+SELECT *,
+    ROUND(opened * 100.0 / recipients, 1) AS open_rate_pct,
+    ROUND(clicked * 100.0 / recipients, 1) AS click_rate_pct,
+    ROUND(clicked * 100.0 / NULLIF(opened, 0), 1) AS click_to_open_pct,
+    ROUND(redeemed * 100.0 / recipients, 1) AS redemption_rate_pct,
+    ROUND(redeemed * 100.0 / NULLIF(clicked, 0), 1) AS click_to_redemption_pct
+FROM campaign_funnel
+ORDER BY redemption_rate_pct DESC;
+
+
+-- Q4. True cost per redemption by campaign (Exploratory)
+SELECT 
+    ca.campaign_id,
+    ca.campaign_name,
+    ca.campaign_type,
+    ca.target_segment,
+    ca.total_recipients,
+    SUM(CASE WHEN cl.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS no_opened,
+    SUM(CASE WHEN cl.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS no_clicked,
+    SUM(cl.coupon_redeemed) AS redeemed,
+    ROUND(SUM(cl.coupon_redeemed) * 100.0 / COUNT(cl.log_id), 1) AS redemption_rate_pct,
+    ca.campaign_cost,
+    ROUND(ca.campaign_cost / NULLIF(SUM(cl.coupon_redeemed), 0), 2) AS cost_per_redemption,
+    ROUND((ca.campaign_cost + COALESCE(SUM(t.discount_amount), 0))
+        / NULLIF(SUM(cl.coupon_redeemed), 0), 2) AS true_cost_per_redemption,
+    ROUND(COALESCE(SUM(t.discount_amount), 0), 2) AS total_discount_given
+FROM Campaign_Logs cl
+JOIN Campaigns ca ON cl.campaign_id = ca.campaign_id
+LEFT JOIN Transactions t ON cl.redemption_txn_id = t.transaction_id
+GROUP BY ca.campaign_id, ca.campaign_name, ca.campaign_type,
+         ca.target_segment, ca.total_recipients, ca.campaign_cost
+ORDER BY true_cost_per_redemption DESC;
+
+
+-- Q5. Revenue and net attributed value by campaign type
+WITH campaign_level AS (
+    SELECT
+        ca.campaign_id,
+        ca.campaign_type,
+        ca.campaign_cost,
+        COUNT(cl.log_id) AS recipients,
+        SUM(CASE WHEN cl.coupon_redeemed = 1 THEN 1 ELSE 0 END) AS redeemed,
+        ROUND(SUM(CASE WHEN cl.redemption_txn_id IS NOT NULL 
+            THEN t.total_amount ELSE 0 END), 2) AS attributed_redeemed_revenue,
+        ROUND(SUM(CASE WHEN cl.redemption_txn_id IS NOT NULL 
+            THEN t.discount_amount ELSE 0 END), 2) AS total_discount_given
+    FROM Campaigns ca
+    LEFT JOIN Campaign_Logs cl ON ca.campaign_id = cl.campaign_id
+    LEFT JOIN Transactions t ON cl.redemption_txn_id = t.transaction_id
+    GROUP BY ca.campaign_id, ca.campaign_type, ca.campaign_cost
+)
+SELECT
+    campaign_type,
+    SUM(redeemed) AS redeemed,
+    ROUND(SUM(attributed_redeemed_revenue), 2) AS attributed_redeemed_revenue,
+    ROUND(SUM(campaign_cost), 2) AS campaign_cost,
+    ROUND(SUM(total_discount_given), 2) AS total_discount_given,
+    ROUND(SUM(attributed_redeemed_revenue) / NULLIF(SUM(redeemed), 0), 2) AS revenue_per_redemption,
+    ROUND(SUM(attributed_redeemed_revenue) - SUM(campaign_cost) 
+        - SUM(total_discount_given), 2) AS net_attributed_value
+FROM campaign_level
+GROUP BY campaign_type
+ORDER BY net_attributed_value DESC;
+
+
+-- Q6. First-time vs existing customer redemption mix
+WITH customer_first_purchase AS (
+    SELECT customer_id,
+           MIN(DATE(transaction_date)) AS first_purchase_date
+    FROM Transactions
+    WHERE status = 'Completed'
+    GROUP BY customer_id
+),
+redeemed_txns AS (
+    SELECT ca.campaign_type,
+           cl.customer_id,
+           DATE(t.transaction_date) AS redemption_date,
+           t.total_amount
+    FROM Campaign_Logs cl
+    JOIN Campaigns ca ON cl.campaign_id = ca.campaign_id
+    JOIN Transactions t ON cl.redemption_txn_id = t.transaction_id
+    WHERE cl.coupon_redeemed = 1 AND t.status = 'Completed'
+)
+SELECT
+    campaign_type,
+    customer_status,
+    redeemed_transactions,
+    ROUND(redeemed_transactions * 100.0 /
+        SUM(redeemed_transactions) OVER (PARTITION BY campaign_type), 1) AS redeemed_share_pct
+FROM (
+    SELECT r.campaign_type,
+           CASE WHEN f.first_purchase_date = r.redemption_date 
+               THEN 'First-time purchaser' ELSE 'Existing customer' END AS customer_status,
+           COUNT(*) AS redeemed_transactions
+    FROM redeemed_txns r
+    JOIN customer_first_purchase f ON r.customer_id = f.customer_id
+    GROUP BY r.campaign_type, customer_status
+)
+ORDER BY campaign_type, customer_status;
+
+
+-- Q7. Static segment mix vs actual RFM mix
+WITH recipient_base AS (
+    SELECT
+        cl.campaign_id,
+        c.campaign_name,
+        DATE(c.send_date) AS send_date,
+        cl.customer_id,
+        cu.customer_segment AS static_segment,
+
+        MAX(DATE(t.transaction_date)) AS last_txn_date,
+        COUNT(DISTINCT CASE 
+            WHEN t.status = 'Completed' THEN DATE(t.transaction_date) 
+        END) AS freq_visits,
+        COALESCE(SUM(CASE 
+            WHEN t.status = 'Completed' THEN t.total_amount 
+        END), 0) AS monetary_value
+
+    FROM Campaign_Logs cl
+    JOIN Campaigns c
+        ON cl.campaign_id = c.campaign_id
+    JOIN Customers cu
+        ON cl.customer_id = cu.customer_id
+    LEFT JOIN Transactions t
+        ON t.customer_id = cl.customer_id
+       AND DATE(t.transaction_date) < DATE(c.send_date)
+
+    WHERE strftime('%Y', c.send_date) = '2024'
+    GROUP BY
+        cl.campaign_id,
+        c.campaign_name,
+        DATE(c.send_date),
+        cl.customer_id,
+        cu.customer_segment
+),
+
+scored AS (
+    SELECT
+        *,
+        CASE
+            WHEN last_txn_date IS NULL THEN 9999
+            ELSE CAST(julianday(send_date) - julianday(last_txn_date) AS INTEGER)
+        END AS recency_days,
+
+        6 - NTILE(5) OVER (
+            PARTITION BY campaign_id
+            ORDER BY CASE
+                        WHEN last_txn_date IS NULL THEN 9999
+                        ELSE julianday(send_date) - julianday(last_txn_date)
+                     END ASC
+        ) AS r_score,
+
+        NTILE(5) OVER (
+            PARTITION BY campaign_id
+            ORDER BY freq_visits ASC
+        ) AS f_score,
+
+        NTILE(5) OVER (
+            PARTITION BY campaign_id
+            ORDER BY monetary_value ASC
+        ) AS m_score
+    FROM recipient_base
+),
+
+rfm_segmented AS (
+    SELECT
+        *,
+        CASE
+            WHEN last_txn_date IS NULL THEN 'New / No Prior Purchase'
+            WHEN r_score >= 4 AND f_score >= 4 AND m_score >= 4 THEN 'Champions'
+            WHEN r_score >= 4 AND f_score >= 3 AND m_score >= 3 THEN 'Loyal'
+            WHEN r_score BETWEEN 2 AND 3 AND f_score >= 4 AND m_score >= 4 THEN 'At-Risk Loyal'
+            WHEN r_score = 1 AND f_score >= 4 AND m_score >= 4 THEN 'Cannot Lose Them'
+            WHEN r_score >= 3 AND f_score BETWEEN 2 AND 3 THEN 'New / Promising'
+            WHEN r_score <= 2 AND f_score <= 2 AND m_score <= 2 THEN 'Lapsed'
+            ELSE 'Mid-Tier'
+        END AS rfm_segment
+    FROM scored
+),
+
+segment_mix AS (
+    SELECT
+        static_segment,
+        rfm_segment,
+        COUNT(*) AS recipients
+    FROM rfm_segmented
+    GROUP BY
+        static_segment,
+        rfm_segment
+)
+
+SELECT
+    static_segment,
+    rfm_segment,
+    recipients,
+    ROUND(
+        100.0 * recipients
+        / SUM(recipients) OVER (PARTITION BY static_segment),
+        1
+    ) AS pct_within_static_segment
+FROM segment_mix
+ORDER BY
+    static_segment,
+    recipients DESC;
+
+
+-- Q8. Redemption rate by RFM segment
+WITH reference_date AS (
+    SELECT MAX(DATE(transaction_date)) AS ref_date
+    FROM Transactions
+    WHERE status = 'Completed'
+),
+customer_metrics AS (
+    SELECT
+        c.customer_id,
+        c.customer_segment AS static_segment,
+        COUNT(DISTINCT DATE(t.transaction_date)) AS frequency,
+        ROUND(SUM(t.total_amount), 2) AS monetary,
+        MAX(DATE(t.transaction_date)) AS last_purchase_date
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY
+        c.customer_id,
+        c.customer_segment
+),
+rfm_scored AS (
+    SELECT
+        m.customer_id,
+        m.static_segment,
+        CAST(JULIANDAY(d.ref_date) - JULIANDAY(m.last_purchase_date) AS INTEGER) AS days_since_last_purchase,
+        NTILE(5) OVER (
+            ORDER BY JULIANDAY(d.ref_date) - JULIANDAY(m.last_purchase_date) ASC
+        ) AS r_score,
+        NTILE(5) OVER (ORDER BY m.frequency) AS f_score,
+        NTILE(5) OVER (ORDER BY m.monetary) AS m_score
+    FROM customer_metrics m
+    CROSS JOIN reference_date d
+),
+rfm_labeled AS (
+    SELECT
+        customer_id,
+        CASE
+            WHEN r_score >= 4 AND f_score >= 4 AND m_score >= 4 THEN 'Champions'
+            WHEN r_score >= 3 AND f_score >= 3 AND m_score >= 4 THEN 'Loyal'
+            WHEN r_score >= 4 AND f_score <= 2 THEN 'New / promising'
+            WHEN r_score <= 2 AND m_score >= 4 THEN 'Cannot lose them'
+            WHEN r_score <= 2 AND f_score >= 3 AND m_score >= 3 THEN 'At-risk loyals'
+            WHEN r_score <= 2 AND f_score <= 2 THEN 'Lapsed'
+            ELSE 'Mid-tier'
+        END AS rfm_segment
+    FROM rfm_scored
+),
+recipient_base AS (
+    SELECT
+        cl.customer_id,
+        cl.campaign_id,
+        cl.coupon_redeemed
+    FROM Campaign_Logs cl
+    JOIN Campaigns c
+        ON cl.campaign_id = c.campaign_id
+    WHERE strftime('%Y', c.send_date) = '2024'
+)
+SELECT
+    r.rfm_segment,
+    COUNT(*) AS recipients,
+    SUM(rb.coupon_redeemed) AS redemptions,
+    ROUND(100.0 * SUM(rb.coupon_redeemed) / COUNT(*), 1) AS redemption_rate_pct
+FROM recipient_base rb
+JOIN rfm_labeled r
+    ON rb.customer_id = r.customer_id
+GROUP BY
+    r.rfm_segment
+ORDER BY
+    redemption_rate_pct DESC;
+
+-- Additional Analysis -- 
+-- Q1. Which districts contribute the most customer value?
+WITH customer_value AS (
+    SELECT
+  c.customer_id,
+        c.district,
+        SUM(t.total_amount) AS total_spend
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.customer_id, c.district
+),
+district_summary AS (
+    SELECT
+        district,
+        COUNT(customer_id) AS total_customers,
+        ROUND(SUM(total_spend), 2) AS district_total_revenue,
+        ROUND(AVG(total_spend), 2) AS avg_customer_spend
+    FROM customer_value
+    GROUP BY district
+),
+total_revenue AS (
+    SELECT SUM(district_total_revenue) AS overall_revenue
+    FROM district_summary
+)
+SELECT
+    d.district,
+    d.total_customers,
+    d.district_total_revenue,
+    d.avg_customer_spend,
+    ROUND(d.district_total_revenue * 100.0 / t.overall_revenue, 2) AS revenue_share_pct,
+    DENSE_RANK() OVER (ORDER BY d.district_total_revenue DESC) AS district_revenue_rank
+FROM district_summary d
+CROSS JOIN total_revenue t
+ORDER BY d.district_total_revenue DESC;
+
+--Q2. Who is the highest-spending customer within each district?
+WITH customer_value AS (
+    SELECT
+        c.customer_id,
+        c.first_name || ' ' || c.last_name AS customer_name,
+        c.district,
+        COUNT(t.transaction_id) AS total_transactions,
+        ROUND(SUM(t.total_amount), 2) AS total_spend,
+        ROUND(AVG(t.total_amount), 2) AS avg_order_value
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.customer_id, c.first_name, c.last_name, c.district
+),
+ranked_customers AS (
+    SELECT
+        district,
+        customer_id,
+        customer_name,
+        total_transactions,
+        total_spend,
+        avg_order_value,
+        DENSE_RANK() OVER (
+            PARTITION BY district
+            ORDER BY total_spend DESC
+        ) AS district_rank
+    FROM customer_value
+)
+SELECT *
+FROM ranked_customers
+WHERE district_rank = 1
+ORDER BY total_spend DESC;
+
+--Q3. How concentrated is BrewCo’s customer base across districts?
+WITH district_customers AS (
+    SELECT
+        district,
+        COUNT(customer_id) AS total_customers
+    FROM Customers
+    GROUP BY district
+),
+total_base AS (
+    SELECT SUM(total_customers) AS overall_customers
+    FROM district_customers
+),
+ranked AS (
+    SELECT
+        d.district,
+        d.total_customers,
+ROUND(d.total_customers * 100.0 / t.overall_customers, 2) AS customer_share_pct
+    FROM district_customers d
+    CROSS JOIN total_base t
+)
+SELECT
+    district,
+    total_customers,
+    customer_share_pct,
+    ROUND(
+        SUM(customer_share_pct) OVER (
+            ORDER BY total_customers DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ),
+        2
+    ) AS cumulative_customer_share_pct
+FROM ranked
+ORDER BY total_customers DESC;
+
+--Q4. How strong is repeat purchase behaviour across districts?
+WITH daily_purchases AS (
+    SELECT
+        t.customer_id,
+        c.district,
+        DATE(t.transaction_date) AS purchase_date
+    FROM Transactions t
+    JOIN Customers c
+        ON t.customer_id = c.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY t.customer_id, c.district, DATE(t.transaction_date)
+),
+purchase_gaps AS (
+    SELECT
+        customer_id,
+        district,
+        purchase_date,
+        JULIANDAY(purchase_date) - JULIANDAY(
+            LAG(purchase_date) OVER (
+                PARTITION BY customer_id
+                ORDER BY purchase_date
+            )
+        ) AS days_between_purchases
+FROM daily_purchases
+),
+customer_summary AS (
+    SELECT
+        customer_id,
+        district,
+        COUNT(purchase_date) AS visit_count,
+        ROUND(AVG(days_between_purchases), 2) AS avg_days_between_purchases
+    FROM purchase_gaps
+    GROUP BY customer_id, district
+),
+repeat_classified AS (
+    SELECT
+        customer_id,
+        district,
+        CASE
+            WHEN visit_count = 1 THEN 'One-time'
+            WHEN avg_days_between_purchases <= 30 THEN 'Frequent repeat'
+            WHEN avg_days_between_purchases <= 60 THEN 'Moderate repeat'
+            ELSE 'Infrequent repeat'
+        END AS repeat_behaviour
+    FROM customer_summary
+)
+SELECT
+    district,
+    repeat_behaviour,
+    COUNT(*) AS customer_count,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY district),
+        2
+    ) AS district_share_pct
+FROM repeat_classified
+GROUP BY district, repeat_behaviour
+ORDER BY district, district_share_pct DESC;
+
+--Q5. How does retention status vary across districts?\
+WITH reference_date AS (
+    SELECT MAX(DATE(transaction_date)) AS ref_date
+    FROM Transactions
+    WHERE status = 'Completed'
+),
+customer_recency AS (
+SELECT
+        c.customer_id,
+        c.district,
+        MAX(DATE(t.transaction_date)) AS last_purchase_date
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.customer_id, c.district
+),
+classified AS (
+    SELECT
+        district,
+        customer_id,
+        CASE
+            WHEN JULIANDAY((SELECT ref_date FROM reference_date)) - JULIANDAY(last_purchase_date) <= 30 THEN 'Active'
+            WHEN JULIANDAY((SELECT ref_date FROM reference_date)) - JULIANDAY(last_purchase_date) <= 60 THEN 'Warm'
+            WHEN JULIANDAY((SELECT ref_date FROM reference_date)) - JULIANDAY(last_purchase_date) <= 90 THEN 'At Risk'
+            ELSE 'Lapsed'
+        END AS retention_status
+    FROM customer_recency
+)
+SELECT
+    district,
+    retention_status,
+    COUNT(*) AS customer_count,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY district),
+        2
+    ) AS district_share_pct
+FROM classified
+GROUP BY district, retention_status
+ORDER BY district, district_share_pct DESC;
+
+--Q6. What type of customers make up each district?
+WITH reference_date AS (
+    SELECT MAX(DATE(transaction_date)) AS ref_date
+    FROM Transactions
+    WHERE status = 'Completed'
+),
+customer_metrics AS (
+    SELECT
+        c.customer_id,
+        c.district,
+        COUNT(DISTINCT DATE(t.transaction_date)) AS total_visits,
+        COUNT(t.transaction_id) AS total_transactions,
+        ROUND(SUM(t.total_amount), 2) AS total_spend,
+        ROUND(AVG(t.total_amount), 2) AS avg_order_value,
+        MAX(DATE(t.transaction_date)) AS last_purchase_date
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.customer_id, c.district
+),
+customer_with_quintile AS (
+    SELECT
+        cm.*,
+        CAST(
+            JULIANDAY(d.ref_date) - JULIANDAY(cm.last_purchase_date)
+            AS INTEGER
+        ) AS days_since_last_purchase,
+        NTILE(5) OVER (ORDER BY cm.total_spend) AS spend_quintile
+    FROM customer_metrics cm
+    CROSS JOIN reference_date d
+),
+segmented AS (
+    SELECT
+        district,
+        customer_id,
+        total_spend,
+        CASE
+            WHEN spend_quintile >= 4
+                 AND total_visits >= 3
+                 AND days_since_last_purchase <= 60
+                THEN 'High-value loyal'
+            WHEN spend_quintile >= 4
+                 AND total_visits >= 3
+                 AND days_since_last_purchase > 60
+                THEN 'High-value at risk'
+            WHEN spend_quintile < 4
+                 AND total_visits >= 3
+                THEN 'Low-value repeat'
+            ELSE 'Occasional/one-time'
+        END AS customer_segment_label
+    FROM customer_with_quintile
+)
+SELECT
+    district,
+    customer_segment_label,
+    COUNT(*) AS customer_count,
+    ROUND(SUM(total_spend), 2) AS segment_revenue,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY district),
+        2
+    ) AS district_share_pct
+FROM segmented
+GROUP BY district, customer_segment_label
+ORDER BY district, district_share_pct DESC;
+
+--Q7. How are customers classified under the RFM framework?
+WITH reference_date AS (
+    SELECT MAX(DATE(transaction_date)) AS ref_date
+    FROM Transactions
+    WHERE status = 'Completed'
+),
+customer_metrics AS (
+    SELECT
+        c.customer_id,
+        c.district,
+        COUNT(DISTINCT DATE(t.transaction_date)) AS frequency,
+        ROUND(SUM(t.total_amount), 2) AS monetary,
+        MAX(DATE(t.transaction_date)) AS last_purchase_date
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.customer_id, c.district
+),
+rfm_scored AS (
+    SELECT
+        m.customer_id,
+        m.district,
+        6 - NTILE(5) OVER (
+            ORDER BY JULIANDAY(d.ref_date) - JULIANDAY(m.last_purchase_date)
+        ) AS r_score,
+ NTILE(5) OVER (ORDER BY m.frequency) AS f_score,
+        NTILE(5) OVER (ORDER BY m.monetary) AS m_score
+    FROM customer_metrics m
+    CROSS JOIN reference_date d
+),
+rfm_segmented AS (
+    SELECT
+        district,
+        customer_id,
+        CASE
+            WHEN r_score >= 4 AND f_score >= 4 AND m_score >= 4 THEN 'Champions'
+            WHEN r_score >= 3 AND f_score >= 3 AND m_score >= 4 THEN 'Loyal'
+            WHEN r_score >= 4 AND f_score <= 2 THEN 'New/promising'
+            WHEN r_score <= 2 AND m_score >= 4 THEN 'Cannot lose them'
+            WHEN r_score <= 2 AND f_score >= 3 AND m_score < 4 THEN 'At-risk loyals'
+            WHEN r_score <= 2 AND f_score <= 2 THEN 'Lapsed'
+            ELSE 'Mid-tier'
+        END AS rfm_segment
+    FROM rfm_scored
+)
+SELECT
+    district,
+    rfm_segment,
+    COUNT(*) AS customer_count,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY district),
+        2
+    ) AS district_share_pct
+FROM rfm_segmented
+GROUP BY district, rfm_segment
+ORDER BY district, district_share_pct DESC;
+
+--Q8. Which districts combine strong customer value with higher risk exposure?
+--For Scatter plot
+WITH district_revenue AS (
+    SELECT
+        c.district,
+        ROUND(SUM(t.total_amount), 2) AS district_total_revenue
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.district
+),
+district_ranked AS (
+    SELECT
+        district,
+        district_total_revenue,
+        DENSE_RANK() OVER (
+            ORDER BY district_total_revenue DESC
+        ) AS district_value_rank
+    FROM district_revenue
+),
+reference_date AS (
+    SELECT MAX(DATE(transaction_date)) AS ref_date
+    FROM Transactions
+    WHERE status = 'Completed'
+),
+customer_metrics AS (
+    SELECT
+        c.customer_id,
+        c.district,
+        COUNT(DISTINCT DATE(t.transaction_date)) AS frequency,
+        ROUND(SUM(t.total_amount), 2) AS monetary,
+        MAX(DATE(t.transaction_date)) AS last_purchase_date
+    FROM Customers c
+    JOIN Transactions t
+        ON c.customer_id = t.customer_id
+    WHERE t.status = 'Completed'
+    GROUP BY c.customer_id, c.district
+),
+rfm_scored AS (
+    SELECT
+        m.customer_id,
+        m.district,
+        6 - NTILE(5) OVER (
+            ORDER BY JULIANDAY(d.ref_date) - JULIANDAY(m.last_purchase_date)
+        ) AS r_score,
+        NTILE(5) OVER (ORDER BY m.frequency) AS f_score,
+        NTILE(5) OVER (ORDER BY m.monetary) AS m_score
+    FROM customer_metrics m
+    CROSS JOIN reference_date d
+),
+rfm_segmented AS (
+    SELECT
+        district,
+        customer_id,
+        CASE
+            WHEN r_score >= 4 AND f_score >= 4 AND m_score >= 4 THEN 'Champions'
+            WHEN r_score >= 3 AND f_score >= 3 AND m_score >= 4 THEN 'Loyal'
+            WHEN r_score >= 4 AND f_score <= 2 THEN 'New / promising'
+            WHEN r_score <= 2 AND m_score >= 4 THEN 'Cannot lose them'
+            WHEN r_score <= 2 AND f_score >= 3 AND m_score < 4 THEN 'At-risk loyals'
+            WHEN r_score <= 2 AND f_score <= 2 THEN 'Lapsed'
+            ELSE 'Mid-tier'
+        END AS rfm_segment
+    FROM rfm_scored
+),
+district_rfm_summary AS (
+    SELECT
+        district,
+        rfm_segment,
+        COUNT(*) AS customer_count,
+        ROUND(
+            COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY district),
+            2
+        ) AS district_share_pct
+    FROM rfm_segmented
+    GROUP BY district, rfm_segment
+)
+SELECT
+    d.district,
+    d.district_total_revenue,
+    d.district_value_rank,
+    ROUND(SUM(CASE
+        WHEN s.rfm_segment IN ('Champions', 'Loyal')
+        THEN s.district_share_pct
+        ELSE 0
+    END), 2) AS strong_value_base_pct,
+    ROUND(SUM(CASE
+        WHEN s.rfm_segment IN ('Cannot lose them', 'At-risk loyals')
+        THEN s.district_share_pct
+        ELSE 0
+    END), 2) AS risk_exposure_pct
+FROM district_rfm_summary s
+JOIN district_ranked d
+    ON s.district = d.district
+GROUP BY
+    d.district,
+    d.district_total_revenue,
+    d.district_value_rank
+ORDER BY d.district_value_rank;
+
+
+-- Additional Analysis :Product Bundles --
+
+-- Q1: Which products and bundles generate the most revenue according to ?
+--By Single Item
+SELECT
+    p.product_name,
+    p.category,
+    SUM(ti.line_total)                                   AS total_revenue,
+    SUM(ti.quantity)                                     AS total_units_sold,
+    ROUND(SUM(ti.line_total) / SUM(ti.quantity), 2)      AS avg_revenue_per_unit
+FROM Transaction_Items ti
+JOIN Products     p  ON ti.product_id = p.product_id
+JOIN Transactions t  ON ti.transaction_id = t.transaction_id
+WHERE t.status      = 'Completed'
+  AND ti.product_id IS NOT NULL       
+GROUP BY p.product_id, p.product_name, p.category
+ORDER BY total_revenue DESC
+LIMIT 10;
+
+--By bundle
+ SELECT
+    p.bundle_name,
+    SUM(ti.line_total) AS total_revenue,
+    SUM(ti.quantity)   AS total_units_sold,
+    ROUND(100.0 * SUM(ti.line_total) /
+          SUM(SUM(ti.line_total)) OVER (), 2) AS revenue_share_pct
+FROM Transaction_Items ti
+JOIN Products p      ON ti.product_id = p.product_id
+JOIN Transactions t  ON ti.transaction_id = t.transaction_id
+WHERE t.status = 'Completed'
+  AND ti.product_id IS NOT NULL
+  AND p.bundle_name IS NOT NULL
+GROUP BY p.bundle_name
+ORDER BY total_revenue DESC;
+
+--Q2: Which bundle combinations sell best? Which of them are out-performing / under-performing? 
+WITH bundle_metrics AS (
+    SELECT 
+        b.bundle_id,
+        b.bundle_name,
+        COUNT(DISTINCT ti.transaction_id) AS transactions,
+        SUM(ti.quantity)                  AS total_units_sold,
+        SUM(ti.line_total)                AS total_revenue
+    FROM Transaction_Items ti
+    JOIN Bundles b       ON ti.bundle_id = b.bundle_id
+    JOIN Transactions t  ON ti.transaction_id = t.transaction_id
+    WHERE t.status = 'Completed'
+    GROUP BY b.bundle_id, b.bundle_name
+)
+
+SELECT
+    bundle_name,
+    transactions,
+    total_units_sold,
+    total_revenue,
+
+    -- revenue share 
+    ROUND(100.0 * total_revenue / 
+          SUM(total_revenue) OVER (), 2) AS revenue_share_pct,
+
+    -- avg revenue per transaction
+    ROUND(total_revenue * 1.0 / transactions, 2) AS avg_revenue_per_txn,
+
+    -- avg price per unit 
+    ROUND(total_revenue * 1.0 / total_units_sold, 2) AS avg_price_per_unit
+
+FROM bundle_metrics
+ORDER BY total_revenue DESC;
+
+--Q3: How does the sales channel shape bundle adoption and transaction composition?
+WITH txn_type AS (
+    SELECT
+        t.transaction_id,
+        t.channel,
+        CASE 
+            WHEN SUM(CASE WHEN ti.bundle_id IS NOT NULL THEN 1 ELSE 0 END) > 0
+                THEN 'Bundle Purchase'
+            ELSE 'Single Item Purchase'
+        END AS purchase_type
+    FROM Transactions t
+    JOIN Transaction_Items ti 
+        ON t.transaction_id = ti.transaction_id
+    WHERE t.status = 'Completed'
+    GROUP BY t.transaction_id, t.channel
+)
+
+SELECT
+    channel,
+    purchase_type,
+    COUNT(*) AS transactions,
+    
+    SUM(COUNT(*)) OVER (PARTITION BY channel) AS total_channel_transactions,
+    
+    ROUND(100.0 * COUNT(*) /
+          SUM(COUNT(*)) OVER (PARTITION BY channel), 1) AS pct_within_channel
+
+FROM txn_type
+GROUP BY channel, purchase_type
+ORDER BY channel, purchase_type;
+
+--End
